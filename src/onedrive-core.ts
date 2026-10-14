@@ -14,6 +14,15 @@ export function onedriveChildrenUrl(itemId: string): string {
 	return `${ONEDRIVE_GRAPH}/me/drive/items/${encodeURIComponent(itemId)}/children`;
 }
 
+/** Read Graph's short-lived, pre-authorized content URL from file metadata.
+ * It must be requested without the Graph bearer token: forwarding that token
+ * to OneDrive's storage host makes some Consumer accounts reject the download
+ * as unauthenticated. */
+export function onedriveDownloadUrl(item: Record<string, unknown>): string {
+	const value = item["@microsoft.graph.downloadUrl"];
+	return typeof value === "string" ? value : "";
+}
+
 /** Address an item under the app folder.
  *
  * Graph's path form has two distinct shapes:

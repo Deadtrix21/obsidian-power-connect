@@ -9,7 +9,7 @@
 
 import { requestUrl, RequestUrlResponse } from "obsidian";
 import { DropboxError, ListEntry, RemoteFileMeta, assertWholeDownload, backoffMs, msg, normRel, parseRetryAfter } from "./core";
-import { ONEDRIVE_GRAPH as GRAPH, onedriveChildrenUrl, onedriveItemUrl, onedriveReferencePath, onedriveRelativePath } from "./onedrive-core";
+import { ONEDRIVE_GRAPH as GRAPH, onedriveChildrenUrl, onedriveDownloadUrl, onedriveItemUrl, onedriveReferencePath, onedriveRelativePath } from "./onedrive-core";
 import { quickXorHash } from "./quickxor";
 
 const LOGIN = "https://login.microsoftonline.com/common/oauth2/v2.0";
@@ -207,6 +207,28 @@ export class OneDrive {
 		}
 	}
 
+	/** Download from Graph's short-lived pre-authorized URL. Never attach the
+	 * Microsoft Graph bearer token to the OneDrive storage host. */
+	private async downloadContent(url: string, path: string): Promise<RequestUrlResponse> {
+		for (let attempt = 0; ; attempt++) {
+			let r: RequestUrlResponse;
+			try {
+				r = await requestUrl({ url, method: "GET", throw: false });
+			} catch (e) {
+				if (attempt >= 4) throw new DropboxError(`Could not download ${path}: network unreachable (${msg(e)}).`, 0, "network");
+				await sleep(backoffMs(attempt, 1000));
+				continue;
+			}
+			if ((r.status === 429 || r.status >= 500) && attempt < 4) {
+				const wait = parseRetryAfter(r.headers["retry-after"] ?? r.headers["Retry-After"] ?? "") || backoffMs(attempt, 1000);
+				this.o.log(`OneDrive is busy (${r.status}); retrying a download in ${Math.round(wait / 1000)}s`);
+				await sleep(wait);
+				continue;
+			}
+			return r;
+		}
+	}
+
 	/** URL for an engine path like "/Root/sub/file.md" under the app folder. */
 	private itemUrl(path: string, suffix = ""): string {
 		return onedriveItemUrl(path, suffix);
@@ -326,8 +348,11 @@ export class OneDrive {
 		await this.approotBase();
 		const rm = await this.call(this.itemUrl(path), `download ${path}`);
 		if (rm.status !== 200) throw graphError(rm, `download ${path}`);
-		const meta = this.itemMeta(JSON.parse(rm.text) as Record<string, unknown>);
-		const rc = await this.call(this.itemUrl(path, "/content"), `download ${path}`);
+		const item = JSON.parse(rm.text) as Record<string, unknown>;
+		const meta = this.itemMeta(item);
+		const downloadUrl = onedriveDownloadUrl(item);
+		if (!downloadUrl) throw new DropboxError(`Could not download ${path}: Microsoft returned no download URL.`, 502, "invalid_response");
+		const rc = await this.downloadContent(downloadUrl, path);
 		if (rc.status !== 200) throw graphError(rc, `download ${path}`);
 		assertWholeDownload(path, rc.arrayBuffer.byteLength, meta.size);
 		return { bytes: rc.arrayBuffer, meta };
